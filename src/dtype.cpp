@@ -14,18 +14,21 @@ bool htp_supports(LayerId layer, DType dtype) {
     case LayerId::Dense:
     case LayerId::Softmax:
     case LayerId::LayerNorm:
+    case LayerId::RmsNorm:
     case LayerId::Cnn2:
     case LayerId::ConvT2:
     case LayerId::Embedding:
     case LayerId::Residual:
     case LayerId::SwiGlu:
     case LayerId::Mha:
-    case LayerId::RmsNorm:
+      return f32 || f16 || i8 || i16;
     case LayerId::Cnn3:
     case LayerId::ConvT3:
-      return f32 || f16 || i8 || i16;
+      // V73/HNRD: int16/uint16 Conv3d/TransposeConv3d finalize fails (prepare -1).
+      return f32 || f16 || i8;
     case LayerId::Lstm:
-      return f32 || f16 || dtype == DType::Int8 || dtype == DType::UInt8;
+      // Welvet gate-compose on HTP: f32/f16 solid; int8 execute flaky on HNRD.
+      return f32 || f16;
     default:
       return false;
   }

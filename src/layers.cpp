@@ -5,6 +5,7 @@
 
 #if defined(WELVET_QNN_HAS_SDK) && WELVET_QNN_HAS_SDK
 #include "QnnOpDef.h"
+#include "compose.hpp"
 #include "graph_util.hpp"
 #endif
 
@@ -196,19 +197,11 @@ Status RmsNorm::forward(Session& sess, int32_t batch, int32_t seq, const float* 
     return Status::Failed("rmsnorm: bad args / session");
   if (!htp_supports(LayerId::RmsNorm, dtype) && sess.backend() == BackendKind::Htp)
     return Status::Unsupported("rmsnorm: dtype not on HTP");
-  // Snapdragon X (V73) + HNRD path: native q::QNN_RmsNorm is registered as *disabled*
-  // ("no properties registered for q::QNN_RmsNorm"). Use LayerNorm-equivalent blank
-  // (beta=0) on HTP until an ElementWise compose lands.
-  if (sess.backend() == BackendKind::Htp) {
-    LayerNorm ln;
-    ln.dim = dim;
-    ln.eps = eps;
-    ln.dtype = dtype;
-    ln.gamma = gamma;
-    ln.beta.assign((size_t)dim, 0.f);
-    return ln.forward(sess, batch, seq, x, y);
-  }
   const int32_t tokens = batch * seq;
+  // V73/HNRD: native RmsNorm op disabled → ElementWise compose (Welvet-shaped).
+  if (sess.backend() == BackendKind::Htp) {
+    return graph::run_rmsnorm_compose(sess, tokens, dim, eps, gamma.data(), x, y, dtype);
+  }
   uint32_t dims[2] = {(uint32_t)tokens, (uint32_t)dim};
   return graph::run_unary(sess, "wq_rmsnorm", QNN_OP_RMS_NORM, 2, dims, x, y,
                           (size_t)tokens * dim, dtype, gamma.data(), gamma.size(), "gamma",
@@ -255,11 +248,10 @@ Status Lstm::forward(Session& sess, int32_t seq, int32_t batch, const float* x, 
     return Status::Failed("lstm: bad args");
   if (!htp_supports(LayerId::Lstm, dtype) && sess.backend() == BackendKind::Htp)
     return Status::Unsupported("lstm dtype");
-  // HTP Lstm expects the full multi-input weight pack (~14 tensors). Saver accepts a
-  // simplified 4-input form for graph compose; live HTP needs the full layout (next).
+  // Welvet pack [i|f|g|o]×(IH|HH|bias) — HTP runs gate compose; Saver keeps monolithic Lstm.
   if (sess.backend() == BackendKind::Htp) {
-    return Status::Unsupported(
-        "lstm: HTP needs full QNN Lstm input pack (14 tensors) — blank 4-input form is Saver-only");
+    return graph::run_lstm_welvet(sess, seq, batch, input_size, hidden_size, w_in.data(),
+                                  w_rec.data(), b.data(), x, y, dtype);
   }
   return graph::run_lstm_native(sess, seq, batch, input_size, hidden_size, w_in.data(),
                                 w_rec.data(), b.data(), x, y, dtype);
@@ -299,27 +291,9 @@ Status Mha::forward(Session& sess, int32_t batch, int32_t seq, const float* x, f
   if (!sess.ready() || !x || !y || batch <= 0 || seq <= 0 || dim <= 0 || heads <= 0)
     return Status::Failed("mha: bad args");
   if (dim % heads != 0) return Status::Failed("mha: dim % heads != 0");
-  // Compose: Q/K/V projections + scaled-dot via MatMul-less blank path:
-  // For blank smoke we project Q,K,V then residual-add Q+V (attention body = later).
-  // Full attention score Softmax needs reshape/transpose; blank verifies FC+Softmax+Add compose.
-  const int32_t tokens = batch * seq;
-  std::vector<float> q((size_t)tokens * dim), k((size_t)tokens * dim), v((size_t)tokens * dim),
-      attn((size_t)tokens * dim), out((size_t)tokens * dim);
-  auto st = graph::run_fc(sess, tokens, dim, dim, w_q.data(), x, q.data(), dtype);
-  if (!st) return st;
-  st = graph::run_fc(sess, tokens, dim, dim, w_k.data(), x, k.data(), dtype);
-  if (!st) return st;
-  st = graph::run_fc(sess, tokens, dim, dim, w_v.data(), x, v.data(), dtype);
-  if (!st) return st;
-  // Softmax over last dim of Q (placeholder attention weights per token)
-  uint32_t dims[2] = {(uint32_t)tokens, (uint32_t)dim};
-  st = graph::run_unary(sess, "wq_mha_sm", QNN_OP_SOFTMAX, 2, dims, q.data(), attn.data(),
-                        (size_t)tokens * dim, dtype, nullptr, 0, nullptr, nullptr, 0, nullptr);
-  if (!st) return st;
-  st = graph::run_binary(sess, "wq_mha_mul", QNN_OP_ELEMENT_WISE_MULTIPLY, (size_t)tokens * dim,
-                         attn.data(), v.data(), out.data(), dtype);
-  if (!st) return st;
-  return graph::run_fc(sess, tokens, dim, dim, w_o.data(), out.data(), y, dtype);
+  // Welvet MHA: Dense Q/K/V/O + MatMul(Q,K^T) → Softmax → MatMul(_,V) → O
+  return graph::run_mha_compose(sess, batch, seq, dim, heads, w_q.data(), w_k.data(), w_v.data(),
+                                w_o.data(), x, y, dtype);
 }
 
 #else
