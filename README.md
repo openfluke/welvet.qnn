@@ -5,7 +5,7 @@ Public surface is **Welvet-shaped** (layer blanks + `DType`) so a **C ABI / Go F
 
 | | |
 |--|--|
-| **Library** | **0.2.0** |
+| **Library** | **0.2.1** |
 | **SDK** | QAIRT **2.42.0.251225** · QNN API **2.32** |
 | **Host** | Windows ARM64 · Snapdragon X · Hexagon **V73** · HNRD |
 | **Smoke** | `pass=165 fail=0 skip=21` — **live HTP** |
@@ -35,6 +35,30 @@ Legend: ✅ live NPU · — skipped (caps) · bf16 = V81+ only
 | MHA | ✅ | ✅ | ✅ | ✅ | — | Dense Q/K/V/O + MatMul attention |
 
 Skips are intentional caps in `htp_supports()` — not silent fails.
+
+---
+
+## Sequential networks (Welvet Go style)
+
+Chain layers dynamically — output of A feeds B feeds C:
+
+```cpp
+#include "welvet_qnn/sequential.hpp"
+
+welvet_qnn::Sequential net;
+net.push(welvet_qnn::Dense::blank(4, 8));
+net.push(welvet_qnn::RmsNorm::blank(8));
+net.push(welvet_qnn::Dense::blank(8, 4));
+net.push(welvet_qnn::Softmax::blank(4));
+
+net.forward(sess, /*batch=*/1, x, y, /*seq=*/1);
+// or: Sequential::dense_tower(dim, depth)  // like sequential.New
+```
+
+`push` rejects shape mismatches (`child in != prev out`).  
+Today each child is still its own HTP graph (host ping-pong buffers). Fused single-graph Sequential = later (with C ABI).
+
+Children: Dense, Softmax, RmsNorm, LayerNorm, SwiGlu, Mha, Lstm.
 
 ---
 

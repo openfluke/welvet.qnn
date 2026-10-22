@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(welvet_qnn VERSION 0.2.0 LANGUAGES CXX)
+project(welvet_qnn VERSION 0.2.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,6 +26,7 @@ add_library(welvet_qnn
   src/dtype.cpp
   src/session.cpp
   src/layers.cpp
+  src/sequential.cpp
 )
 add_library(welvet_qnn::welvet_qnn ALIAS welvet_qnn)
 

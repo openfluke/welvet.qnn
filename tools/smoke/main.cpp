@@ -6,6 +6,7 @@
 #include "welvet_qnn/detect.hpp"
 #include "welvet_qnn/dtype.hpp"
 #include "welvet_qnn/layers.hpp"
+#include "welvet_qnn/sequential.hpp"
 #include "welvet_qnn/session.hpp"
 
 using namespace welvet_qnn;
@@ -220,7 +221,7 @@ static void run_layers_saver() {
 }
 
 int main() {
-  std::printf("welvet.qnn smoke v0.2.0 (Welvet packs — C ABI later)\n");
+  std::printf("welvet.qnn smoke v0.2.1 (Welvet Sequential + packs)\n");
   std::printf("supported layers:");
   for (const char** p = supported_layers; *p; ++p) std::printf(" %s", *p);
   std::printf("\n");
@@ -244,6 +245,45 @@ int main() {
   else
     skip("detect_htp_providers", "getProviders not available");
 
+  auto run_sequential_smoke = [&](BackendKind kind, const char* label) {
+    Session sess;
+    std::string err;
+    std::printf("\n=== sequential network on %s ===\n", label);
+    if (!try_session(kind, &sess, &err)) {
+      skip((std::string("sequential_") + label).c_str(), err);
+      return;
+    }
+    // Welvet-style: Dense → RmsNorm → Dense → Softmax
+    Sequential net;
+    auto st = net.push(Dense::blank(4, 8));
+    if (st) st = net.push(RmsNorm::blank(8));
+    if (st) st = net.push(Dense::blank(8, 4));
+    if (st) st = net.push(Softmax::blank(4));
+    if (!st) {
+      fail((std::string("sequential_build_") + label).c_str(), st.message);
+      return;
+    }
+    std::vector<float> x = {1, 2, 3, 4}, y(4, 0);
+    st = net.forward(sess, /*batch=*/1, x.data(), y.data(), /*seq=*/1);
+    check((std::string("sequential_mlp_") + label).c_str(), st);
+
+    // Dense tower (like sequential.New depth×dim)
+    auto tower = Sequential::dense_tower(4, 3);
+    x = {0.5f, 0.5f, 0.5f, 0.5f};
+    y.assign(4, 0);
+    st = tower.forward(sess, 1, x.data(), y.data(), 1);
+    check((std::string("sequential_tower_") + label).c_str(), st);
+
+    // Shape mismatch must fail
+    Sequential bad;
+    (void)bad.push(Dense::blank(4, 4));
+    st = bad.push(Dense::blank(8, 4)); // in 8 != prev out 4
+    if (!st)
+      ok((std::string("sequential_reject_bad_link_") + label).c_str());
+    else
+      fail((std::string("sequential_reject_bad_link_") + label).c_str(), "expected reject");
+  };
+
   {
     Session probe;
     std::string err;
@@ -251,6 +291,7 @@ int main() {
     if (try_session(BackendKind::Htp, &probe, &err)) {
       ok("open_htp");
       run_layers_htp();
+      run_sequential_smoke(BackendKind::Htp, "htp");
     } else {
       skip("open_htp", err);
       std::printf("  !! NPU NOT RUNNING\n");
@@ -259,6 +300,7 @@ int main() {
 
   std::printf("\n=== open saver (graph-only, NOT NPU) ===\n");
   run_layers_saver();
+  run_sequential_smoke(BackendKind::Saver, "saver");
 
   std::printf("\nRESULT pass=%d fail=%d skip=%d\n", g_pass, g_fail, g_skip);
   std::printf("NOTE: only HTP rows with PASS are live NPU.\n");
