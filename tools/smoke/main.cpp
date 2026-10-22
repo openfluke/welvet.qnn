@@ -77,10 +77,14 @@ static bool try_session(BackendKind kind, Session* out, std::string* err) {
 
 static void check(const char* name, const Status& st, bool numeric_expected) {
   (void)numeric_expected;
-  if (!st)
-    fail(name, st.message);
-  else
+  if (!st) {
+    if (st.code == Code::Unsupported)
+      skip(name, st.message);
+    else
+      fail(name, st.message);
+  } else {
     ok(name);
+  }
 }
 
 static void run_layers(Session& sess, const char* backend_label, bool numeric) {

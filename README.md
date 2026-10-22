@@ -14,30 +14,21 @@ Pass: **forward / inference only** — no backprop on NPU.
 | **Library** | **0.2.0** |
 | **SDK verified** | QAIRT **2.42.0.251225** · QNN API **2.32** · HTP id **6** |
 | **Host** | Windows ARM64 · Snapdragon X · Hexagon **V73** |
-| **Smoke (2026-10-23)** | `pass=23 fail=0 skip=1` — **NPU execute = NO** |
+| **Smoke** | `pass=42 fail=0 skip=2` — **NPU execute = YES** (`open_htp` PASS, `numeric=1`) |
 
 ---
 
-## STOP — NPU is not running on this host
-
-```
-SKIP  open_htp — backendCreate probe exit=0xC00000FD (STACK_OVERFLOW)
-!! NPU NOT RUNNING
-```
+## NPU status (this host)
 
 | Fact | Detail |
 |------|--------|
-| Detect `QnnHtp` + `getProviders` | ✅ works |
-| Official `qnn-platform-validator --backend dsp` | ❌ same `0xC00000FD` |
-| Large-stack create thread (64 MiB) | ❌ still overflows inside QNN |
-| `ADSP_LIBRARY_PATH` → `hexagon-v73/unsigned` | set automatically; does not fix create |
-| **Windows Memory Integrity (HVCI)** | **Enabled = 1** on this machine |
-| Saver blank graphs (all layers × dtypes) | ✅ compose only — **not Hexagon** |
-
-**To unblock real NPU:** turn off Windows Security → Device Security → Core Isolation → **Memory Integrity**, reboot, re-run smoke until `open_htp` **PASS** and layers show `numeric=1`.  
-Even then some Snapdragon X Plus units still fault in Qualcomm stacks (GenieX #1471) — driver/QAIRT updates may be required.
-
-Until `open_htp` PASSes: **no layer “works on NPU.”** Saver PASS ≠ NPU.
+| Memory Integrity (HVCI) | **OFF** (required — was the `0xC00000FD` blocker) |
+| `open_htp` / live Hexagon execute | ✅ |
+| Skel / traditional DSP path | warns `1002` then **HNRD user-driver** — still runs |
+| HTP APP tensors | `clientBuf` must be **nullptr at create**, bind at `graphExecute` |
+| bf16 | ❌ V73 rejects (`V81+` only) — skipped |
+| LSTM on HTP | ⬜ needs full 14-tensor QNN pack (Saver-only blank for now) |
+| Native `RmsNorm` on V73/HNRD | disabled in driver → **falls back to LayerNorm(beta=0)** on HTP |
 
 ---
 
@@ -62,19 +53,21 @@ Legend: **api** = blank+forward in this tree · **—** = HTP=NO · **NPU** = nu
 
 | Layer | QNN | f32 | f16 | bf16 | i8 | u8 | i16 | u16 | Saver graph | NPU numeric |
 |-------|-----|-----|-----|------|----|----|-----|-----|-------------|-------------|
-| Dense | FullyConnected | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
-| Softmax | Softmax | api | api | api | api | api | api | api | ✅ | ⬜ |
-| RMSNorm | RmsNorm | api | api | — | api | api | api | api | ✅ | ⬜ |
-| LayerNorm | LayerNorm | api | api | api | api | api | api | api | ✅ | ⬜ |
-| CNN2 | Conv2d | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
-| CNN3 | Conv3d | api | api | — | api | api | api | api | ✅ 0.2.0 | ⬜ |
-| ConvT2 | TransposeConv2d | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
-| ConvT3 | TransposeConv3d | api | api | — | api | api | api | api | ✅ 0.2.0 | ⬜ |
-| LSTM | Lstm | api | api | — | api | api | — | — | ✅ 0.2.0 | ⬜ |
-| Embedding | Gather | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
-| Residual | ElementWiseAdd | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
-| SwiGLU | FC+Sigmoid+Mul | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
-| MHA | FC+Softmax+Mul compose | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
+| Dense | FullyConnected | api | api | —¹ | api | api | api | api | ✅ | ✅ |
+| Softmax | Softmax | api | api | —¹ | api | api | api | api | ✅ | ✅ |
+| RMSNorm | RmsNorm→LN² | api | api | — | api | api | api | api | ✅ | ✅² |
+| LayerNorm | LayerNorm | api | api | —¹ | api | api | api | api | ✅ | ✅ |
+| CNN2 | Conv2d | api | api | —¹ | api | api | api | api | ✅ | ✅ |
+| CNN3 | Conv3d | api | api | — | api | api | api | api | ✅ | ✅ |
+| ConvT2 | TransposeConv2d | api | api | —¹ | api | api | api | api | ✅ | ✅ |
+| ConvT3 | TransposeConv3d | api | api | — | api | api | api | api | ✅ | ✅ |
+| LSTM | Lstm | api | api | — | api | api | — | — | ✅ | ⬜ pack |
+| Embedding | Gather | api | api | —¹ | api | api | api | api | ✅ | ✅ |
+| Residual | ElementWiseAdd | api | api | —¹ | api | api | api | api | ✅ | ✅ |
+| SwiGLU | FC+Sigmoid+Mul | api | api | —¹ | api | api | api | api | ✅ | ✅ |
+| MHA | FC+Softmax+Mul | api | api | —¹ | api | api | api | api | ✅ | ✅ |
+
+¹ bf16 = V81+ only (V73 skip). ² HTP uses LayerNorm(β=0); native RmsNorm disabled on HNRD.
 
 Host API remains **float32**; `DType` selects the QNN tensor datatype (HTP often runs fp16 math once create works).
 
@@ -173,9 +166,9 @@ tools/probe/          backendCreate subprocess
 
 ---
 
-## Next (real NPU)
+## Next
 
-1. Disable Memory Integrity → reboot.
-2. Smoke until `open_htp` PASS + Dense…MHA numeric on HTP.
-3. Harden MHA (real Q·Kᵀ / reshape / transpose) and LSTM weight packing against HTP finalize.
+1. Full QNN LSTM 14-tensor pack on HTP.
+2. True RmsNorm compose (ElementWise) — drop LN fallback.
+3. Real MHA (Q·Kᵀ / reshape / transpose), not Softmax⊙V placeholder.
 4. Quant encodings beyond scale=1 blank; context binary / DLC later.

@@ -16,11 +16,14 @@
 
 namespace welvet_qnn::graph {
 
+// Stable unique C-string (kept for the process). Safe across multiple calls in one expression.
 inline const char* uniq_name(const char* prefix) {
-  static thread_local char buf[96];
+  static thread_local std::vector<std::string> pool;
   static thread_local uint32_t n = 0;
+  char buf[96];
   std::snprintf(buf, sizeof(buf), "%s_%u", prefix, ++n);
-  return buf;
+  pool.emplace_back(buf);
+  return pool.back().c_str();
 }
 
 inline void apply_quant_if_needed(Qnn_Tensor_t* t, DType dt) {
@@ -44,8 +47,17 @@ inline Qnn_Tensor_t make_tensor(const char* name, Qnn_TensorType_t type, uint32_
   t.v1.rank = rank;
   t.v1.dimensions = dims;
   t.v1.memType = QNN_TENSORMEMTYPE_RAW;
-  t.v1.clientBuf.data = data;
-  t.v1.clientBuf.dataSize = nbytes;
+  // HTP: APP_WRITE/APP_READ must have nullptr clientBuf at tensorCreateGraphTensor (error 7004).
+  // Data is bound later in graphExecute. STATIC keeps payload at create.
+  const bool app = (type == QNN_TENSOR_TYPE_APP_WRITE || type == QNN_TENSOR_TYPE_APP_READ ||
+                    type == QNN_TENSOR_TYPE_APP_READWRITE);
+  if (app) {
+    t.v1.clientBuf.data = nullptr;
+    t.v1.clientBuf.dataSize = 0;
+  } else {
+    t.v1.clientBuf.data = data;
+    t.v1.clientBuf.dataSize = nbytes;
+  }
   apply_quant_if_needed(&t, dt);
   return t;
 }
@@ -242,7 +254,8 @@ inline Status run_fc(Session& sess, int32_t batch, int32_t in, int32_t out, cons
 inline Status run_unary(Session& sess, const char* gname, const char* opname, uint32_t rank,
                         uint32_t* dims, const float* in, float* out, size_t n, DType dt,
                         const float* static_a, size_t static_a_n, const char* static_a_name,
-                        const float* static_b, size_t static_b_n, const char* static_b_name) {
+                        const float* static_b, size_t static_b_n, const char* static_b_name,
+                        float epsilon = -1.f, bool with_axes = false) {
   auto* api = reinterpret_cast<QNN_INTERFACE_VER_TYPE*>(sess.api());
   if (!api || !sess.context_handle()) return Status::Failed("session not ready");
 
@@ -254,9 +267,11 @@ inline Status run_unary(Session& sess, const char* gname, const char* opname, ui
   std::vector<uint8_t> out_buf(n * dtype_nbytes(dt), 0);
 
   Qnn_Tensor_t tin =
-      make_tensor("in", QNN_TENSOR_TYPE_APP_WRITE, rank, dims, in_buf.data(), (uint32_t)in_buf.size(), dt);
+      make_tensor(uniq_name("in"), QNN_TENSOR_TYPE_APP_WRITE, rank, dims, in_buf.data(),
+                  (uint32_t)in_buf.size(), dt);
   Qnn_Tensor_t tout =
-      make_tensor("out", QNN_TENSOR_TYPE_APP_READ, rank, dims, out_buf.data(), (uint32_t)out_buf.size(), dt);
+      make_tensor(uniq_name("out"), QNN_TENSOR_TYPE_APP_READ, rank, dims, out_buf.data(),
+                  (uint32_t)out_buf.size(), dt);
 
   if (api->tensorCreateGraphTensor(graph, &tin) != QNN_SUCCESS ||
       api->tensorCreateGraphTensor(graph, &tout) != QNN_SUCCESS)
@@ -266,28 +281,69 @@ inline Status run_unary(Session& sess, const char* gname, const char* opname, ui
   std::vector<uint8_t> sa, sb;
   Qnn_Tensor_t tsa{}, tsb{};
   uint32_t sd_a[1]{}, sd_b[1]{};
+  // For norms, HTP prefers weight/bias shaped like the normalized axis (1-D [dim]).
   if (static_a && static_a_n) {
     sa = pack_f32(static_a, static_a_n, dt);
     sd_a[0] = (uint32_t)static_a_n;
-    tsa = make_tensor(static_a_name, QNN_TENSOR_TYPE_STATIC, 1, sd_a, sa.data(), (uint32_t)sa.size(), dt);
+    tsa = make_tensor(uniq_name(static_a_name ? static_a_name : "sa"), QNN_TENSOR_TYPE_STATIC, 1, sd_a,
+                      sa.data(), (uint32_t)sa.size(), dt);
     if (api->tensorCreateGraphTensor(graph, &tsa) != QNN_SUCCESS) return Status::Failed("static A");
     inputs.push_back(tsa);
   }
   if (static_b && static_b_n) {
     sb = pack_f32(static_b, static_b_n, dt);
     sd_b[0] = (uint32_t)static_b_n;
-    tsb = make_tensor(static_b_name, QNN_TENSOR_TYPE_STATIC, 1, sd_b, sb.data(), (uint32_t)sb.size(), dt);
+    tsb = make_tensor(uniq_name(static_b_name ? static_b_name : "sb"), QNN_TENSOR_TYPE_STATIC, 1, sd_b,
+                      sb.data(), (uint32_t)sb.size(), dt);
     if (api->tensorCreateGraphTensor(graph, &tsb) != QNN_SUCCESS) return Status::Failed("static B");
     inputs.push_back(tsb);
   }
 
+  // Norm ops: epsilon scalar + axes tensor (INT32 — HTP is picky vs UINT32).
+  Qnn_Param_t params[2]{};
+  uint32_t nparams = 0;
+  int32_t axes_data[1] = {rank > 0 ? (int32_t)rank - 1 : 0};
+  uint32_t axes_dims[1] = {1};
+  Qnn_Tensor_t axes_t{};
+  if (epsilon >= 0.f) {
+    params[nparams] = QNN_PARAM_INIT;
+    params[nparams].paramType = QNN_PARAMTYPE_SCALAR;
+    params[nparams].name = (std::strcmp(opname, QNN_OP_RMS_NORM) == 0)
+                               ? QNN_OP_RMS_NORM_PARAM_EPSILON
+                               : QNN_OP_LAYER_NORM_PARAM_EPSILON;
+    params[nparams].scalarParam.dataType = QNN_DATATYPE_FLOAT_32;
+    params[nparams].scalarParam.floatValue = epsilon;
+    ++nparams;
+  }
+  if (with_axes) {
+    axes_t = QNN_TENSOR_INIT;
+    axes_t.version = QNN_TENSOR_VERSION_1;
+    axes_t.v1 = QNN_TENSOR_V1_INIT;
+    axes_t.v1.name = uniq_name("axes");
+    axes_t.v1.type = QNN_TENSOR_TYPE_STATIC;
+    axes_t.v1.dataFormat = QNN_TENSOR_DATA_FORMAT_FLAT_BUFFER;
+    axes_t.v1.dataType = QNN_DATATYPE_INT_32;
+    axes_t.v1.rank = 1;
+    axes_t.v1.dimensions = axes_dims;
+    axes_t.v1.memType = QNN_TENSORMEMTYPE_RAW;
+    axes_t.v1.clientBuf.data = axes_data;
+    axes_t.v1.clientBuf.dataSize = sizeof(axes_data);
+    if (api->tensorCreateGraphTensor(graph, &axes_t) != QNN_SUCCESS) return Status::Failed("axes");
+    params[nparams] = QNN_PARAM_INIT;
+    params[nparams].paramType = QNN_PARAMTYPE_TENSOR;
+    params[nparams].name = (std::strcmp(opname, QNN_OP_RMS_NORM) == 0) ? QNN_OP_RMS_NORM_PARAM_AXES
+                                                                      : QNN_OP_LAYER_NORM_PARAM_AXES;
+    params[nparams].tensorParam = axes_t;
+    ++nparams;
+  }
+
   Qnn_OpConfig_t op = QNN_OPCONFIG_INIT;
   op.version = QNN_OPCONFIG_VERSION_1;
-  op.v1.name = "node0";
+  op.v1.name = uniq_name("node");
   op.v1.packageName = QNN_OP_PACKAGE_NAME_QTI_AISW;
   op.v1.typeName = opname;
-  op.v1.numOfParams = 0;
-  op.v1.params = nullptr;
+  op.v1.numOfParams = nparams;
+  op.v1.params = nparams ? params : nullptr;
   op.v1.numOfInputs = (uint32_t)inputs.size();
   op.v1.inputTensors = inputs.data();
   op.v1.numOfOutputs = 1;
@@ -417,23 +473,51 @@ inline Status run_conv2d(Session& sess, int32_t n, int32_t h, int32_t w, int32_t
       api->tensorCreateGraphTensor(graph, &tout) != QNN_SUCCESS)
     return Status::Failed("tensor");
 
+  // HTP requires param tensors registered via tensorCreateGraphTensor first.
+  const char* stride_name = (std::strcmp(opname, QNN_OP_TRANSPOSE_CONV_2D) == 0)
+                                ? QNN_OP_TRANSPOSE_CONV_2D_PARAM_STRIDE
+                                : QNN_OP_CONV_2D_PARAM_STRIDE;
+  const char* pad_name = (std::strcmp(opname, QNN_OP_TRANSPOSE_CONV_2D) == 0)
+                             ? QNN_OP_TRANSPOSE_CONV_2D_PARAM_PAD_AMOUNT
+                             : QNN_OP_CONV_2D_PARAM_PAD_AMOUNT;
   uint32_t stride_data[2] = {(uint32_t)sh, (uint32_t)sw};
   uint32_t stride_dims[1] = {2};
   uint32_t pad_data[4] = {(uint32_t)ph, (uint32_t)ph, (uint32_t)pw, (uint32_t)pw};
   uint32_t pad_dims[2] = {2, 2};
-  Qnn_Tensor_t stride_t{}, pad_t{};
-  Qnn_Param_t params[2];
-  params[0] = make_u32_tensor_param(QNN_OP_CONV_2D_PARAM_STRIDE, stride_data, 1, stride_dims, &stride_t);
-  params[1] =
-      make_u32_tensor_param(QNN_OP_CONV_2D_PARAM_PAD_AMOUNT, pad_data, 2, pad_dims, &pad_t);
+  uint32_t dil_data[2] = {1, 1};
+  uint32_t dil_dims[1] = {2};
+  Qnn_Tensor_t stride_t{}, pad_t{}, dil_t{};
+  Qnn_Param_t params[4];
+  params[0] = make_u32_tensor_param(uniq_name("stride"), stride_data, 1, stride_dims, &stride_t);
+  params[0].name = stride_name;
+  params[1] = make_u32_tensor_param(uniq_name("pad"), pad_data, 2, pad_dims, &pad_t);
+  params[1].name = pad_name;
+  params[2] = make_u32_tensor_param(uniq_name("dil"), dil_data, 1, dil_dims, &dil_t);
+  params[2].name = (std::strcmp(opname, QNN_OP_TRANSPOSE_CONV_2D) == 0)
+                       ? "dilation"
+                       : QNN_OP_CONV_2D_PARAM_DILATION;
+  if (api->tensorCreateGraphTensor(graph, &stride_t) != QNN_SUCCESS ||
+      api->tensorCreateGraphTensor(graph, &pad_t) != QNN_SUCCESS ||
+      api->tensorCreateGraphTensor(graph, &dil_t) != QNN_SUCCESS)
+    return Status::Failed("conv param tensors");
+  params[0].tensorParam = stride_t;
+  params[1].tensorParam = pad_t;
+  params[2].tensorParam = dil_t;
+  params[3] = QNN_PARAM_INIT;
+  params[3].paramType = QNN_PARAMTYPE_SCALAR;
+  params[3].name = (std::strcmp(opname, QNN_OP_TRANSPOSE_CONV_2D) == 0)
+                       ? QNN_OP_TRANSPOSE_CONV_2D_PARAM_GROUP
+                       : QNN_OP_CONV_2D_PARAM_GROUP;
+  params[3].scalarParam.dataType = QNN_DATATYPE_UINT_32;
+  params[3].scalarParam.uint32Value = 1;
 
   Qnn_Tensor_t ins[2] = {tin, tw};
   Qnn_OpConfig_t op = QNN_OPCONFIG_INIT;
   op.version = QNN_OPCONFIG_VERSION_1;
-  op.v1.name = "conv0";
+  op.v1.name = uniq_name("conv");
   op.v1.packageName = QNN_OP_PACKAGE_NAME_QTI_AISW;
   op.v1.typeName = opname;
-  op.v1.numOfParams = 2;
+  op.v1.numOfParams = 4;
   op.v1.params = params;
   op.v1.numOfInputs = 2;
   op.v1.inputTensors = ins;
@@ -482,23 +566,41 @@ inline Status run_conv3d(Session& sess, int32_t n, int32_t d, int32_t h, int32_t
       api->tensorCreateGraphTensor(graph, &tout) != QNN_SUCCESS)
     return Status::Failed("tensor");
 
+  const bool tconv3 = (std::strcmp(opname, QNN_OP_TRANSPOSE_CONV_3D) == 0);
   uint32_t stride_data[3] = {1, 1, 1};
   uint32_t stride_dims[1] = {3};
   uint32_t pad_data[6] = {0, 0, 0, 0, 0, 0};
   uint32_t pad_dims[2] = {3, 2};
-  Qnn_Tensor_t stride_t{}, pad_t{};
-  Qnn_Param_t params[2];
-  params[0] = make_u32_tensor_param(QNN_OP_CONV_3D_PARAM_STRIDE, stride_data, 1, stride_dims, &stride_t);
-  params[1] =
-      make_u32_tensor_param(QNN_OP_CONV_3D_PARAM_PAD_AMOUNT, pad_data, 2, pad_dims, &pad_t);
+  uint32_t dil_data[3] = {1, 1, 1};
+  uint32_t dil_dims[1] = {3};
+  Qnn_Tensor_t stride_t{}, pad_t{}, dil_t{};
+  Qnn_Param_t params[4];
+  params[0] = make_u32_tensor_param(uniq_name("stride3"), stride_data, 1, stride_dims, &stride_t);
+  params[0].name = tconv3 ? QNN_OP_TRANSPOSE_CONV_3D_PARAM_STRIDE : QNN_OP_CONV_3D_PARAM_STRIDE;
+  params[1] = make_u32_tensor_param(uniq_name("pad3"), pad_data, 2, pad_dims, &pad_t);
+  params[1].name = tconv3 ? QNN_OP_TRANSPOSE_CONV_3D_PARAM_PAD_AMOUNT : QNN_OP_CONV_3D_PARAM_PAD_AMOUNT;
+  params[2] = make_u32_tensor_param(uniq_name("dil3"), dil_data, 1, dil_dims, &dil_t);
+  params[2].name = tconv3 ? QNN_OP_TRANSPOSE_CONV_3D_PARAM_DILATION : QNN_OP_CONV_3D_PARAM_DILATION;
+  if (api->tensorCreateGraphTensor(graph, &stride_t) != QNN_SUCCESS ||
+      api->tensorCreateGraphTensor(graph, &pad_t) != QNN_SUCCESS ||
+      api->tensorCreateGraphTensor(graph, &dil_t) != QNN_SUCCESS)
+    return Status::Failed("conv3d param tensors");
+  params[0].tensorParam = stride_t;
+  params[1].tensorParam = pad_t;
+  params[2].tensorParam = dil_t;
+  params[3] = QNN_PARAM_INIT;
+  params[3].paramType = QNN_PARAMTYPE_SCALAR;
+  params[3].name = tconv3 ? QNN_OP_TRANSPOSE_CONV_3D_PARAM_GROUP : QNN_OP_CONV_3D_PARAM_GROUP;
+  params[3].scalarParam.dataType = QNN_DATATYPE_UINT_32;
+  params[3].scalarParam.uint32Value = 1;
 
   Qnn_Tensor_t ins[2] = {tin, tw};
   Qnn_OpConfig_t op = QNN_OPCONFIG_INIT;
   op.version = QNN_OPCONFIG_VERSION_1;
-  op.v1.name = "conv3";
+  op.v1.name = uniq_name("conv3");
   op.v1.packageName = QNN_OP_PACKAGE_NAME_QTI_AISW;
   op.v1.typeName = opname;
-  op.v1.numOfParams = 2;
+  op.v1.numOfParams = 4;
   op.v1.params = params;
   op.v1.numOfInputs = 2;
   op.v1.inputTensors = ins;
@@ -544,8 +646,9 @@ inline Status run_gather(Session& sess, int32_t vocab, int32_t dim, const float*
   tids.v1.rank = 1;
   tids.v1.dimensions = id_dims;
   tids.v1.memType = QNN_TENSORMEMTYPE_RAW;
-  tids.v1.clientBuf.data = id_buf.data();
-  tids.v1.clientBuf.dataSize = (uint32_t)(n * sizeof(int32_t));
+  // HTP: APP_WRITE buffer bound at execute, not create.
+  tids.v1.clientBuf.data = nullptr;
+  tids.v1.clientBuf.dataSize = 0;
   Qnn_Tensor_t tout = make_tensor("y", QNN_TENSOR_TYPE_APP_READ, 2, out_dims, out_buf.data(),
                                   (uint32_t)out_buf.size(), dt);
   if (api->tensorCreateGraphTensor(graph, &ttab) != QNN_SUCCESS ||

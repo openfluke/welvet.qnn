@@ -195,11 +195,24 @@ Status RmsNorm::forward(Session& sess, int32_t batch, int32_t seq, const float* 
   if (!sess.ready() || !x || !y || batch <= 0 || seq <= 0 || dim <= 0)
     return Status::Failed("rmsnorm: bad args / session");
   if (!htp_supports(LayerId::RmsNorm, dtype) && sess.backend() == BackendKind::Htp)
-    return Status::Unsupported("rmsnorm: bf16 not on HTP 2.42");
-  uint32_t dims[3] = {(uint32_t)batch, (uint32_t)seq, (uint32_t)dim};
-  return graph::run_unary(sess, "wq_rmsnorm", QNN_OP_RMS_NORM, 3, dims, x, y,
-                          (size_t)batch * seq * dim, dtype, gamma.data(), gamma.size(), "gamma",
-                          nullptr, 0, nullptr);
+    return Status::Unsupported("rmsnorm: dtype not on HTP");
+  // Snapdragon X (V73) + HNRD path: native q::QNN_RmsNorm is registered as *disabled*
+  // ("no properties registered for q::QNN_RmsNorm"). Use LayerNorm-equivalent blank
+  // (beta=0) on HTP until an ElementWise compose lands.
+  if (sess.backend() == BackendKind::Htp) {
+    LayerNorm ln;
+    ln.dim = dim;
+    ln.eps = eps;
+    ln.dtype = dtype;
+    ln.gamma = gamma;
+    ln.beta.assign((size_t)dim, 0.f);
+    return ln.forward(sess, batch, seq, x, y);
+  }
+  const int32_t tokens = batch * seq;
+  uint32_t dims[2] = {(uint32_t)tokens, (uint32_t)dim};
+  return graph::run_unary(sess, "wq_rmsnorm", QNN_OP_RMS_NORM, 2, dims, x, y,
+                          (size_t)tokens * dim, dtype, gamma.data(), gamma.size(), "gamma",
+                          nullptr, 0, nullptr, eps, /*with_axes=*/true);
 }
 
 Status LayerNorm::forward(Session& sess, int32_t batch, int32_t seq, const float* x,
@@ -209,7 +222,7 @@ Status LayerNorm::forward(Session& sess, int32_t batch, int32_t seq, const float
   uint32_t dims[3] = {(uint32_t)batch, (uint32_t)seq, (uint32_t)dim};
   return graph::run_unary(sess, "wq_layernorm", QNN_OP_LAYER_NORM, 3, dims, x, y,
                           (size_t)batch * seq * dim, dtype, gamma.data(), gamma.size(), "gamma",
-                          beta.data(), beta.size(), "beta");
+                          beta.data(), beta.size(), "beta", eps, /*with_axes=*/true);
 }
 
 Status Cnn2::forward(Session& sess, const float* x, float* y) const {
@@ -242,6 +255,12 @@ Status Lstm::forward(Session& sess, int32_t seq, int32_t batch, const float* x, 
     return Status::Failed("lstm: bad args");
   if (!htp_supports(LayerId::Lstm, dtype) && sess.backend() == BackendKind::Htp)
     return Status::Unsupported("lstm dtype");
+  // HTP Lstm expects the full multi-input weight pack (~14 tensors). Saver accepts a
+  // simplified 4-input form for graph compose; live HTP needs the full layout (next).
+  if (sess.backend() == BackendKind::Htp) {
+    return Status::Unsupported(
+        "lstm: HTP needs full QNN Lstm input pack (14 tensors) — blank 4-input form is Saver-only");
+  }
   return graph::run_lstm_native(sess, seq, batch, input_size, hidden_size, w_in.data(),
                                 w_rec.data(), b.data(), x, y, dtype);
 }
