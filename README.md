@@ -1,168 +1,112 @@
 # Welvet × Qualcomm QNN (Hexagon NPU)
 
 **QNN** = Qualcomm AI Engine Direct (API). **QAIRT** = the SDK that ships it.  
-**HTP** = Hexagon Tensor Processor backend (`QnnHtp`) — the Snapdragon **NPU**.
+**HTP** = Hexagon Tensor Processor (`QnnHtp`) — the Snapdragon **NPU**.
 
-This repo (`welvet.qnn`) is a **standalone C++17** library that talks to QNN/HTP only.  
-Target: **NPU forward**. Saver is a graph-compose sandbox when HTP create is broken.  
-CPU/GPU probes exist only to diagnose host faults — they are **not** the product.
+Standalone **C++17** library (`welvet.qnn`). Product target = **NPU forward only**.  
+Saver = graph-compose sandbox when HTP create is broken. CPU/GPU = diagnose only.
 
-Authority for this matrix: QAIRT **2.42** `SupportedOps.html` HTP columns.  
-Pass: **forward / inference only** — no backprop / TrainMode on NPU.
+Authority: QAIRT **2.42** `SupportedOps.html` HTP columns.  
+Pass: **forward / inference only** — no backprop on NPU.
 
-**Library version:** `0.1.0` (CMake `project(welvet_qnn VERSION 0.1.0)`)  
-**Verified against SDK:** QAIRT **2.42.0.251225** · QNN API **2.32** · HTP backendId **6**  
-**Host smoke (2026-10-23):** Windows ARM64 · Snapdragon X126100 · `pass=7 fail=0 skip=2`
+| | |
+|--|--|
+| **Library** | **0.2.0** |
+| **SDK verified** | QAIRT **2.42.0.251225** · QNN API **2.32** · HTP id **6** |
+| **Host** | Windows ARM64 · Snapdragon X · Hexagon **V73** |
+| **Smoke (2026-10-23)** | `pass=23 fail=0 skip=1` — **NPU execute = NO** |
 
 ---
 
-## Implementation checklist (welvet.qnn)
+## STOP — NPU is not running on this host
 
-Tick = code path exists in this tree. **NPU numeric** = HTP `backendCreate` + real execute on Hexagon.
+```
+SKIP  open_htp — backendCreate probe exit=0xC00000FD (STACK_OVERFLOW)
+!! NPU NOT RUNNING
+```
+
+| Fact | Detail |
+|------|--------|
+| Detect `QnnHtp` + `getProviders` | ✅ works |
+| Official `qnn-platform-validator --backend dsp` | ❌ same `0xC00000FD` |
+| Large-stack create thread (64 MiB) | ❌ still overflows inside QNN |
+| `ADSP_LIBRARY_PATH` → `hexagon-v73/unsigned` | set automatically; does not fix create |
+| **Windows Memory Integrity (HVCI)** | **Enabled = 1** on this machine |
+| Saver blank graphs (all layers × dtypes) | ✅ compose only — **not Hexagon** |
+
+**To unblock real NPU:** turn off Windows Security → Device Security → Core Isolation → **Memory Integrity**, reboot, re-run smoke until `open_htp` **PASS** and layers show `numeric=1`.  
+Even then some Snapdragon X Plus units still fault in Qualcomm stacks (GenieX #1471) — driver/QAIRT updates may be required.
+
+Until `open_htp` PASSes: **no layer “works on NPU.”** Saver PASS ≠ NPU.
+
+---
+
+## Implementation checklist (welvet.qnn **0.2.0**)
 
 ### Infra
 
-| Item | Ver | Status | Notes |
-|------|-----|--------|-------|
-| CMake portable C++17 (Win/Linux/mac stub) | 0.1.0 | ✅ | Optional `QAIRT_SDK_ROOT` |
-| Dynamic load `QnnHtp` (+ Cpu/Gpu/Saver/Ir for diagnose) | 0.1.0 | ✅ | No static link to QNN |
-| **Detect NPU stack** (SDK dir, DLL, `getProviders`, buildId) | 0.1.0 | ✅ **works on host** | Does **not** call `backendCreate` |
-| Session open **HTP first** | 0.1.0 | ⬜ blocked | Probe `0xC00000FD` STACK_OVERFLOW |
-| Windows child-process `backendCreate` probe | 0.1.0 | ✅ | Soft-skip so smoke survives |
-| Saver fallback (graph compose only) | 0.1.0 | ✅ | **Not NPU** — bring-up only |
-| CPU open as product path | — | ❌ won't do | Diagnose only; same crash as HTP here |
-| Live **HTP execute** / numeric golden | — | ⬜ | Blocked on create |
-| Context binary / DLC load | — | ⬜ | Later |
-| Quant / fp16 / bf16 / int8 host allowlist | — | ⬜ | v0.1 host dtype = float32 only |
+| Item | Ver | Status |
+|------|-----|--------|
+| Portable CMake C++17 | 0.1.0 | ✅ |
+| Dynamic load QnnHtp (+ diagnose backends) | 0.1.0 | ✅ |
+| Detect NPU stack (`getProviders`, buildId) | 0.1.0 | ✅ on host |
+| Auto `ADSP_LIBRARY_PATH` (hexagon-v73… unsigned skels) | 0.2.0 | ✅ |
+| Child-process + large-stack `backendCreate` probe | 0.2.0 | ✅ (still SKIP here) |
+| Live HTP `backendCreate` / execute | — | ⬜ **host blocked** |
+| DType pack/unpack f32↔f16/bf16/i8/u8/i16/u16 | 0.2.0 | ✅ |
+| HTP caps matrix API (`htp_supports`) | 0.2.0 | ✅ |
 
-### Layers on NPU (HTP)
+### Layers × HTP dtypes (SDK 2.42)
 
-| Layer | QNN op | Blank API | Graph on Saver | Graph on **HTP** | Numeric NPU | Ver |
-|-------|--------|-----------|----------------|------------------|-------------|-----|
-| Dense | FullyConnected | ✅ | ✅ | ⬜ create blocked | ⬜ | 0.1.0 |
-| Softmax | Softmax | ✅ | ✅ | ⬜ | ⬜ | 0.1.0 |
-| RMSNorm | RmsNorm | ✅ | ✅ | ⬜ | ⬜ | 0.1.0 |
-| LayerNorm | LayerNorm | ✅ | ✅ | ⬜ | ⬜ | 0.1.0 |
-| CNN2 / CNN3 / ConvT* | Conv* | ⬜ | ⬜ | ⬜ | ⬜ | — |
-| LSTM / Embedding | Lstm / Gather | ⬜ | ⬜ | ⬜ | ⬜ | — |
-| MHA / SwiGLU / Residual | compose | ⬜ | ⬜ | ⬜ | ⬜ | — |
+Legend: **api** = blank+forward in this tree · **—** = HTP=NO · **NPU** = numeric on live HTP (needs create)
 
-### Host smoke result (this machine)
+| Layer | QNN | f32 | f16 | bf16 | i8 | u8 | i16 | u16 | Saver graph | NPU numeric |
+|-------|-----|-----|-----|------|----|----|-----|-----|-------------|-------------|
+| Dense | FullyConnected | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
+| Softmax | Softmax | api | api | api | api | api | api | api | ✅ | ⬜ |
+| RMSNorm | RmsNorm | api | api | — | api | api | api | api | ✅ | ⬜ |
+| LayerNorm | LayerNorm | api | api | api | api | api | api | api | ✅ | ⬜ |
+| CNN2 | Conv2d | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
+| CNN3 | Conv3d | api | api | — | api | api | api | api | ✅ 0.2.0 | ⬜ |
+| ConvT2 | TransposeConv2d | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
+| ConvT3 | TransposeConv3d | api | api | — | api | api | api | api | ✅ 0.2.0 | ⬜ |
+| LSTM | Lstm | api | api | — | api | api | — | — | ✅ 0.2.0 | ⬜ |
+| Embedding | Gather | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
+| Residual | ElementWiseAdd | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
+| SwiGLU | FC+Sigmoid+Mul | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
+| MHA | FC+Softmax+Mul compose | api | api | api | api | api | api | api | ✅ 0.2.0 | ⬜ |
 
-| Check | Result |
-|-------|--------|
-| Detect SDK + `QnnHtp` + `getProviders` | **PASS** (NPU software stack visible) |
-| `open_htp` / `backendCreate` | **SKIP** `0xC00000FD` — **this is the NPU blocker** |
-| `open_cpu` | SKIP same fault (ignore — not the goal) |
-| `open_saver` + blank Dense/Softmax/RMSNorm/LayerNorm | **PASS** (graphs only, no Hexagon math) |
-| Numeric NPU forward | **NOT YET** |
+Host API remains **float32**; `DType` selects the QNN tensor datatype (HTP often runs fp16 math once create works).
 
-Until HTP create works: we have **detect + blank layer API + Saver graphs**. We do **not** yet have “NPU ran the op.”
-
----
-
-## NPU can do it — wired in welvet.qnn (blank + graph)
-
-These have a C++ QNN graph path in this repo.  
-**Run dtype today (v0.1):** `float32` (HTP often executes as **FP16 math** once create works).
-
-| Layer | QNN op(s) | HTP dtypes (SDK 2.42) | Notes |
-|-------|-----------|------------------------|-------|
-| **Dense** | FullyConnected, MatMul | bf16, fp16, int16, int8 | Primary path |
-| **Softmax** | Softmax, LogSoftmax | bf16, fp16, int16, int8 | Standard / Temperature@1 only |
-| **RMSNorm** | RmsNorm | fp16, int16, int8 | **No BF16** on HTP in 2.42 |
-| **LayerNorm** | LayerNorm | bf16, fp16, int16, int8 | |
-
-**Host dtypes we will schedule on HTP (SDK ceiling):**  
-`float32` (via fp16), `float16`, `bfloat16` (Windows **V81+**), `int8`, `uint8`, `int16`, `uint16`.
-
-**Not on HTP:** `float64`, FP8/FP6/FP4, sub-byte ints, nf4, ternary/binary, complex, native int/uint/uintptr, etc.
-
----
-
-## NPU can do it — not implemented in welvet.qnn yet
-
-SDK has a direct HTP op (or a clear compose path), but this library has **no** blank/forward graph yet.
-
-### Native QNN ops (direct)
-
-| Layer | QNN op(s) | HTP dtypes | Gap |
-|-------|-----------|------------|-----|
-| CNN2 | Conv2d, DepthWiseConv2d | bf16, fp16, int16, int8 | No HTP forward yet |
-| CNN3 | Conv3d | fp16, int16, int8 | No BF16; not wired |
-| ConvT2 | TransposeConv2d | bf16, fp16, int16, int8 | Not wired |
-| ConvT3 | TransposeConv3d | fp16, int16, int8 | No BF16; not wired |
-| LSTM | Lstm | fp16, int8 | No BF16/INT16; not wired |
-| Embedding | Gather | bf16, fp16, int16, int8, others | Indices often INT32; not wired |
-
-### Compose (build from HTP primitives)
-
-| Layer | Would use | Gap |
-|-------|-----------|-----|
-| MHA | MatMul, Softmax, Mul, Transpose, Reshape | No MultiHead op; MaskedSoftmax HTP=NO in 2.42 |
-| SwiGLU | FC/MatMul, Mul, Sigmoid | SiLU ≈ x·σ(x); not wired as one graph |
-| Sequential | Child graph | Only if every child is HTP-capable |
-| Residual | ElementWiseAdd | Not wired |
-
-### Extra dtypes on wired layers
-
-NPU columns exist for **fp16 / bf16 / int8 / int16** on Dense/Softmax/norms, but the **run allowlist is still float32 only**. Quantized and native fp16/bf16 paths are not exposed yet.
-
----
-
-## Layers the NPU cannot carry (as-is)
+### Not on HTP (do not schedule)
 
 | Layer | Why |
 |-------|-----|
-| CNN1 | Conv1d **HTP=NO** all dtypes |
-| ConvT1 | TransposeConv1d **HTP=NO** |
-| RNN | No QNN RNN on HTP (only Gru/Lstm) |
-| KMeans | No clustering op |
-| Mamba | No SSM / selective-scan op in 2.42 |
-| GDN / Metacognition | App-specific; no QNN equivalent |
-| Parallel / Stack | Hosts — not single HTP leaves (children may map individually) |
+| CNN1 / ConvT1 | Conv1d / TransposeConv1d **HTP=NO** |
+| RNN | no QNN RNN (only Gru/Lstm) |
+| KMeans / Mamba / GDN | no op |
+| Parallel / Stack | hosts, not leaves |
 
 ---
 
-## What else QNN/HTP can do (no first-class layer yet)
+## NPU can do it — notes (keep)
 
-Non-exhaustive; see QAIRT OpDef / `SupportedOps.html`:
+### Native vs compose
 
-| Area | Examples (QNN) | welvet.qnn status |
-|------|----------------|-------------------|
-| Pooling | PoolAvg2d/3d, PoolMax2d/3d, L2 pool | Not modeled |
-| Activations | Relu, Gelu, Tanh, PRelu, HardSwish, ElementWiseNeuron | Not standalone |
-| Elementwise | Add/Mul/Sub/Div, unary | Compose pieces only |
-| Reduce / Softmax variants | Reduce*, LogSoftmax, ArgMax | Softmax only |
-| Normalization | BatchNorm, InstanceNorm, GroupNorm | Only LayerNorm / RMSNorm |
-| Attention extras | multi-head pattern, RoPE-style | MHA compose later |
-| RNN family | **Gru** (HTP), Lstm | Neither wired |
-| Image / CV | Pad, Crop, Resize, ChannelShuffle, SpaceToDepth | Not modeled |
-| Quant tooling | Encoding, per-channel scales, UFIXED graphs | No quant-deploy path |
-| Backends | QnnCpu, QnnGpu, QnnSaver/Ir | **Product = HTP only**; others diagnose/bring-up |
-| Graph packaging | Context binary / DLC / qnn-net-run | Online small graphs only |
+| Kind | Layers |
+|------|--------|
+| Native QNN | Dense, Softmax, RMSNorm, LayerNorm, CNN2/3, ConvT2/3, LSTM, Embedding |
+| Compose | Residual, SwiGLU, MHA (no MultiHead op; MaskedSoftmax HTP=NO in 2.42) |
 
----
+### Extra
 
-## Status legend
-
-| Tag | Meaning |
-|-----|---------|
-| **Wired (blank)** | C++ blank + QNN graph in this repo (`dense` / `softmax` / `rmsnorm` / `layernorm` × f32) |
-| **NPU numeric** | Same graph executed on live HTP (needs `backendCreate`) |
-| **Native (gap)** | HTP op exists; blank/forward not implemented yet |
-| **Compose (gap)** | Doable from HTP ops; not mapped yet |
-| **None** | Do not schedule on NPU |
+Pooling, standalone activations, BatchNorm/InstanceNorm/GroupNorm, Gru, CV pad/resize, quant-deploy / DLC import — SDK can; not first-class layers here yet.
 
 ---
 
 ## Build
 
-Needs CMake ≥ 3.16 and a C++17 compiler (Clang, GCC, MSVC).  
-Optional: QAIRT SDK (`QAIRT_SDK_ROOT` or `-DQAIRT_SDK_ROOT=`).
-
 ```bash
-# Windows ARM64 (llvm-mingw example)
 cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_COMPILER=aarch64-w64-mingw32-clang++ \
@@ -170,37 +114,30 @@ cmake -S . -B build -G Ninja \
 cmake --build build -j
 ```
 
-```bash
-# Linux aarch64
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DQAIRT_SDK_ROOT=$QAIRT_SDK_ROOT
-cmake --build build -j
-```
-
-Without the SDK you still get a **stub** library: detect can see filesystem hints; session/layers return Unavailable.
-
 | Target | Role |
 |--------|------|
 | `libwelvet_qnn` | Static library |
-| `welvet_qnn_smoke` | Detect NPU + open HTP + blank layer smoke |
-| `welvet_qnn_probe` | Child-process HTP `backendCreate` gate (Windows) |
+| `welvet_qnn_smoke` | Detect + **HTP first** + all layers/dtypes (Saver fallback labeled NOT NPU) |
+| `welvet_qnn_probe` | Child-process HTP create gate (64 MiB stack thread) |
 
 ---
 
 ## Run smoke
 
 ```powershell
-$env:QAIRT_SDK_ROOT = "C:\Qualcomm\AIStack\QAIRT\qairt\<ver>"
+$env:QAIRT_SDK_ROOT = "C:\Qualcomm\AIStack\QAIRT\qairt\2.42.0.251225"
 $env:PATH = ".\build;$env:QAIRT_SDK_ROOT\lib\aarch64-windows-msvc;$env:PATH"
-# Force NPU only (default preference is already htp):
 $env:WELVET_QNN_BACKEND = "htp"
 .\build\welvet_qnn_smoke.exe
 ```
 
-| Variable | Meaning |
-|----------|---------|
-| `QAIRT_SDK_ROOT` / `QNN_SDK_ROOT` | SDK root |
-| `WELVET_QNN_BACKEND` | Prefer `htp` (NPU). `saver` = graph-only. `cpu`/`gpu` = diagnose only |
-| `WELVET_QNN_INPROC=1` | Skip subprocess probe (unsafe if create crashes) |
+| Env | Meaning |
+|-----|---------|
+| `WELVET_QNN_BACKEND=htp` | Prefer NPU |
+| `WELVET_QNN_INPROC=1` | Skip subprocess probe (unsafe) |
+| `WELVET_QNN_ADSP_FORCE=1` | Overwrite existing `ADSP_LIBRARY_PATH` |
+
+Success criteria for “NPU works”: `open_htp` **PASS** and layer lines without `(graph)` / with `numeric=1`.
 
 ---
 
@@ -208,14 +145,19 @@ $env:WELVET_QNN_BACKEND = "htp"
 
 ```cpp
 #include "welvet_qnn/detect.hpp"
-#include "welvet_qnn/session.hpp"
+#include "welvet_qnn/dtype.hpp"
 #include "welvet_qnn/layers.hpp"
+#include "welvet_qnn/session.hpp"
 
-auto d = welvet_qnn::detect();          // NPU stack visible?
+auto d = welvet_qnn::detect();
 welvet_qnn::Session sess;
-welvet_qnn::Session::open(Backend::Htp, &sess);  // real NPU — currently blocked on this host
-auto dense = welvet_qnn::Dense::blank(4, 4);
+welvet_qnn::Session::open(welvet_qnn::BackendKind::Htp, &sess); // NPU
+
+auto dense = welvet_qnn::Dense::blank(4, 4, welvet_qnn::DType::Float16);
 dense.forward(sess, 1, x, y);
+
+auto cnn = welvet_qnn::Cnn2::blank(3, 16);
+auto mha = welvet_qnn::Mha::blank(64, 8);
 ```
 
 ---
@@ -223,16 +165,17 @@ dense.forward(sess, 1, x, y);
 ## Layout
 
 ```
-include/welvet_qnn/   public headers
-src/                  detect, session, layers
-tools/smoke/          end-to-end verifier
+include/welvet_qnn/   detect, session, layers, dtype, status
+src/                  detect, dtype, session, layers, graph_util
+tools/smoke/          verifier (HTP first; Saver ≠ NPU)
 tools/probe/          backendCreate subprocess
 ```
 
 ---
 
-## Next (to get real NPU, not Saver)
+## Next (real NPU)
 
-1. Unblock HTP `backendCreate` on this Snapdragon host (driver / QAIRT / stack size — same `0xC00000FD` hits official tools).
-2. Re-run smoke with `WELVET_QNN_BACKEND=htp` until Dense/Softmax/RMSNorm/LayerNorm show **numeric PASS on HTP**.
-3. Then expand checklist: fp16/bf16/int8 allowlist, then CNN2 / LSTM / compose (MHA, SwiGLU, Residual).
+1. Disable Memory Integrity → reboot.
+2. Smoke until `open_htp` PASS + Dense…MHA numeric on HTP.
+3. Harden MHA (real Q·Kᵀ / reshape / transpose) and LSTM weight packing against HTP finalize.
+4. Quant encodings beyond scale=1 blank; context binary / DLC later.

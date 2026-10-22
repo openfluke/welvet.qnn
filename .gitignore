@@ -1,6 +1,8 @@
 /build*/
 /out*/
 /cmake-build-*/
+/saver_output/
+**/saver_output/
 /.vs/
 /.vscode/
 *.user

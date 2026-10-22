@@ -2,11 +2,16 @@
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <utility>
 #include <vector>
 
 #include "platform.hpp"
 #include "welvet_qnn/detect.hpp"
+
+#if !defined(_WIN32)
+#include <cstdlib>
+#endif
 
 #if defined(WELVET_QNN_HAS_SDK) && WELVET_QNN_HAS_SDK
 #include "QnnInterface.h"
@@ -103,11 +108,40 @@ const char* dll_name(BackendKind k) {
 
 } // namespace
 
+namespace {
+
+// Prepend Hexagon skel dirs so HTP can find libQnnHtpV*Skel.so (Windows DSP loader).
+void ensure_adsp_library_path(const std::string& sdk_root) {
+  if (sdk_root.empty()) return;
+  if (!plat::getenv_str("ADSP_LIBRARY_PATH").empty() && !plat::env_truthy("WELVET_QNN_ADSP_FORCE"))
+    return;
+  namespace fs = std::filesystem;
+  std::string joined;
+  // Prefer V73 (Snapdragon X) then V81 then others that exist under SDK.
+  const char* arches[] = {"hexagon-v73", "hexagon-v81", "hexagon-v79", "hexagon-v75",
+                          "hexagon-v69", "hexagon-v68"};
+  for (const char* a : arches) {
+    fs::path p = fs::path(sdk_root) / "lib" / a / "unsigned";
+    if (!fs::is_directory(p)) continue;
+    if (!joined.empty()) joined += ";";
+    joined += p.string();
+  }
+  if (joined.empty()) return;
+#if defined(_WIN32)
+  SetEnvironmentVariableA("ADSP_LIBRARY_PATH", joined.c_str());
+#else
+  setenv("ADSP_LIBRARY_PATH", joined.c_str(), 1);
+#endif
+}
+
+} // namespace
+
 Status Session::load_locked(BackendKind kind) {
   DetectResult det = detect();
   if (!det.sdk_found || det.lib_dir.empty()) {
     return Status::Unavailable("QAIRT SDK not detected (set QAIRT_SDK_ROOT)");
   }
+  ensure_adsp_library_path(det.sdk_root);
   const char* name = dll_name(kind);
   if (!name) return Status::Unsupported("unknown backend kind");
 

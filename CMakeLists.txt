@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(welvet_qnn VERSION 0.1.0 LANGUAGES CXX)
+project(welvet_qnn VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,6 +23,7 @@ endif()
 
 add_library(welvet_qnn
   src/detect.cpp
+  src/dtype.cpp
   src/session.cpp
   src/layers.cpp
 )
