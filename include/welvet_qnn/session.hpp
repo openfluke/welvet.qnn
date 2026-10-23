@@ -9,6 +9,13 @@
 
 namespace welvet_qnn {
 
+// Last HTP graph phase costs (filled by graph_util / prepared execute).
+struct PhaseTiming {
+  int64_t create_ns = 0;   // graphCreate + tensorCreate + addNode
+  int64_t finalize_ns = 0; // graphFinalize (compile)
+  int64_t execute_ns = 0;  // graphExecute only
+};
+
 // Live QNN backend + context. Forward-only graphs.
 class Session {
  public:
@@ -33,6 +40,8 @@ class Session {
   void* backend_handle() const { return backend_; }
   void* context_handle() const { return context_; }
   void* api() const { return api_; } // QNN_INTERFACE_VER_TYPE*
+
+  PhaseTiming last_phase{};
 
  private:
   Status load_locked(BackendKind kind);

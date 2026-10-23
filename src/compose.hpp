@@ -52,6 +52,7 @@ inline Status run_rmsnorm_compose(Session& sess, int32_t tokens, int32_t dim, fl
                                   const float* gamma, const float* x, float* y, DType dt) {
   auto* api = reinterpret_cast<QNN_INTERFACE_VER_TYPE*>(sess.api());
   if (!api || !sess.context_handle()) return Status::Failed("session not ready");
+  const int64_t t0 = mono_ns();
   Qnn_GraphHandle_t graph = nullptr;
   if (api->graphCreate(sess.context_handle(), uniq_name("wq_rmsc"), nullptr, &graph) != QNN_SUCCESS)
     return Status::Failed("graphCreate");
@@ -141,7 +142,9 @@ inline Status run_rmsnorm_compose(Session& sess, int32_t tokens, int32_t dim, fl
   st = add_node(api, graph, uniq_name("scale"), QNN_OP_ELEMENT_WISE_MULTIPLY, sc_in, 2, &ty, 1);
   if (!st) return st;
 
+  const int64_t t1 = mono_ns();
   if (api->graphFinalize(graph, nullptr, nullptr) != QNN_SUCCESS) return Status::Failed("finalize");
+  const int64_t t2 = mono_ns();
   Qnn_Tensor_t ex = tx, ey = ty;
   ex.v1.clientBuf.data = xb.data();
   ex.v1.clientBuf.dataSize = (uint32_t)xb.size();
@@ -149,7 +152,9 @@ inline Status run_rmsnorm_compose(Session& sess, int32_t tokens, int32_t dim, fl
   ey.v1.clientBuf.dataSize = (uint32_t)yb.size();
   if (api->graphExecute(graph, &ex, 1, &ey, 1, nullptr, nullptr) != QNN_SUCCESS)
     return Status::Failed("execute");
+  const int64_t t3 = mono_ns();
   unpack_to_f32(yb.data(), n, dt, y);
+  mark_phase(sess, t1 - t0, t2 - t1, t3 - t2);
   return Status::Ok();
 }
 

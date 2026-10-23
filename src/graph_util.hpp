@@ -2,9 +2,12 @@
 
 #if defined(WELVET_QNN_HAS_SDK) && WELVET_QNN_HAS_SDK
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -16,12 +19,27 @@
 
 namespace welvet_qnn::graph {
 
-// Stable unique C-string (kept for the process). Safe across multiple calls in one expression.
+inline int64_t mono_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+inline void mark_phase(Session& sess, int64_t create_ns, int64_t finalize_ns, int64_t execute_ns) {
+  sess.last_phase.create_ns = create_ns;
+  sess.last_phase.finalize_ns = finalize_ns;
+  sess.last_phase.execute_ns = execute_ns;
+}
+
+// Stable unique C-string (kept for the process). Process-wide counter — cgo may
+// call from different OS threads; thread_local counters collide on HTP graphCreate.
 inline const char* uniq_name(const char* prefix) {
-  static thread_local std::vector<std::string> pool;
-  static thread_local uint32_t n = 0;
+  static std::mutex mu;
+  static std::vector<std::string> pool;
+  static std::atomic<uint32_t> n{0};
   char buf[96];
-  std::snprintf(buf, sizeof(buf), "%s_%u", prefix, ++n);
+  std::snprintf(buf, sizeof(buf), "%s_%u", prefix, n.fetch_add(1) + 1);
+  std::lock_guard<std::mutex> lock(mu);
   pool.emplace_back(buf);
   return pool.back().c_str();
 }
@@ -197,6 +215,7 @@ inline Status run_fc(Session& sess, int32_t batch, int32_t in, int32_t out, cons
   auto* api = reinterpret_cast<QNN_INTERFACE_VER_TYPE*>(sess.api());
   if (!api || !sess.context_handle()) return Status::Failed("session not ready");
 
+  const int64_t t0 = mono_ns();
   Qnn_GraphHandle_t graph = nullptr;
   if (api->graphCreate(sess.context_handle(), uniq_name("wq_dense"), nullptr, &graph) != QNN_SUCCESS)
     return Status::Failed("graphCreate");
@@ -212,11 +231,11 @@ inline Status run_fc(Session& sess, int32_t batch, int32_t in, int32_t out, cons
   auto w_buf = pack_f32(W, n_w, dt);
   std::vector<uint8_t> out_buf(n_out * dtype_nbytes(dt), 0);
 
-  Qnn_Tensor_t tin = make_tensor("x", QNN_TENSOR_TYPE_APP_WRITE, 2, in_dims, in_buf.data(),
+  Qnn_Tensor_t tin = make_tensor(uniq_name("x"), QNN_TENSOR_TYPE_APP_WRITE, 2, in_dims, in_buf.data(),
                                  (uint32_t)in_buf.size(), dt);
-  Qnn_Tensor_t tw = make_tensor("w", QNN_TENSOR_TYPE_STATIC, 2, w_dims, w_buf.data(),
+  Qnn_Tensor_t tw = make_tensor(uniq_name("w"), QNN_TENSOR_TYPE_STATIC, 2, w_dims, w_buf.data(),
                                 (uint32_t)w_buf.size(), dt);
-  Qnn_Tensor_t tout = make_tensor("y", QNN_TENSOR_TYPE_APP_READ, 2, out_dims, out_buf.data(),
+  Qnn_Tensor_t tout = make_tensor(uniq_name("y"), QNN_TENSOR_TYPE_APP_READ, 2, out_dims, out_buf.data(),
                                   (uint32_t)out_buf.size(), dt);
 
   if (api->tensorCreateGraphTensor(graph, &tin) != QNN_SUCCESS ||
@@ -227,7 +246,7 @@ inline Status run_fc(Session& sess, int32_t batch, int32_t in, int32_t out, cons
   Qnn_Tensor_t ins[2] = {tin, tw};
   Qnn_OpConfig_t op = QNN_OPCONFIG_INIT;
   op.version = QNN_OPCONFIG_VERSION_1;
-  op.v1.name = "fc0";
+  op.v1.name = uniq_name("fc0");
   op.v1.packageName = QNN_OP_PACKAGE_NAME_QTI_AISW;
   op.v1.typeName = QNN_OP_FULLY_CONNECTED;
   op.v1.numOfParams = 0;
@@ -238,7 +257,9 @@ inline Status run_fc(Session& sess, int32_t batch, int32_t in, int32_t out, cons
   op.v1.outputTensors = &tout;
 
   if (api->graphAddNode(graph, op) != QNN_SUCCESS) return Status::Failed("addNode FC");
+  const int64_t t1 = mono_ns();
   if (api->graphFinalize(graph, nullptr, nullptr) != QNN_SUCCESS) return Status::Failed("finalize");
+  const int64_t t2 = mono_ns();
 
   Qnn_Tensor_t ein = tin, eout = tout;
   ein.v1.clientBuf.data = in_buf.data();
@@ -247,7 +268,9 @@ inline Status run_fc(Session& sess, int32_t batch, int32_t in, int32_t out, cons
   eout.v1.clientBuf.dataSize = (uint32_t)out_buf.size();
   if (api->graphExecute(graph, &ein, 1, &eout, 1, nullptr, nullptr) != QNN_SUCCESS)
     return Status::Failed("execute");
+  const int64_t t3 = mono_ns();
   unpack_to_f32(out_buf.data(), n_out, dt, y);
+  mark_phase(sess, t1 - t0, t2 - t1, t3 - t2);
   return Status::Ok();
 }
 
@@ -259,6 +282,7 @@ inline Status run_unary(Session& sess, const char* gname, const char* opname, ui
   auto* api = reinterpret_cast<QNN_INTERFACE_VER_TYPE*>(sess.api());
   if (!api || !sess.context_handle()) return Status::Failed("session not ready");
 
+  const int64_t t0 = mono_ns();
   Qnn_GraphHandle_t graph = nullptr;
   if (api->graphCreate(sess.context_handle(), uniq_name(gname), nullptr, &graph) != QNN_SUCCESS)
     return Status::Failed("graphCreate");
@@ -351,7 +375,9 @@ inline Status run_unary(Session& sess, const char* gname, const char* opname, ui
 
   if (api->graphAddNode(graph, op) != QNN_SUCCESS)
     return Status::Failed(std::string("addNode ") + opname);
+  const int64_t t1 = mono_ns();
   if (api->graphFinalize(graph, nullptr, nullptr) != QNN_SUCCESS) return Status::Failed("finalize");
+  const int64_t t2 = mono_ns();
 
   Qnn_Tensor_t ein = tin, eout = tout;
   ein.v1.clientBuf.data = in_buf.data();
@@ -360,7 +386,9 @@ inline Status run_unary(Session& sess, const char* gname, const char* opname, ui
   eout.v1.clientBuf.dataSize = (uint32_t)out_buf.size();
   if (api->graphExecute(graph, &ein, 1, &eout, 1, nullptr, nullptr) != QNN_SUCCESS)
     return Status::Failed("execute");
+  const int64_t t3 = mono_ns();
   unpack_to_f32(out_buf.data(), n, dt, out);
+  mark_phase(sess, t1 - t0, t2 - t1, t3 - t2);
   return Status::Ok();
 }
 
@@ -368,6 +396,7 @@ inline Status run_binary(Session& sess, const char* gname, const char* opname, s
                          const float* a, const float* b, float* y, DType dt) {
   auto* api = reinterpret_cast<QNN_INTERFACE_VER_TYPE*>(sess.api());
   if (!api || !sess.context_handle()) return Status::Failed("session not ready");
+  const int64_t t0 = mono_ns();
   Qnn_GraphHandle_t graph = nullptr;
   if (api->graphCreate(sess.context_handle(), uniq_name(gname), nullptr, &graph) != QNN_SUCCESS)
     return Status::Failed("graphCreate");
@@ -398,7 +427,9 @@ inline Status run_binary(Session& sess, const char* gname, const char* opname, s
   op.v1.numOfOutputs = 1;
   op.v1.outputTensors = &ty;
   if (api->graphAddNode(graph, op) != QNN_SUCCESS) return Status::Failed("addNode");
+  const int64_t t1 = mono_ns();
   if (api->graphFinalize(graph, nullptr, nullptr) != QNN_SUCCESS) return Status::Failed("finalize");
+  const int64_t t2 = mono_ns();
   Qnn_Tensor_t ea = ta, eb = tb, ey = ty;
   ea.v1.clientBuf.data = ab.data();
   ea.v1.clientBuf.dataSize = (uint32_t)ab.size();
@@ -409,7 +440,9 @@ inline Status run_binary(Session& sess, const char* gname, const char* opname, s
   Qnn_Tensor_t eins[2] = {ea, eb};
   if (api->graphExecute(graph, eins, 2, &ey, 1, nullptr, nullptr) != QNN_SUCCESS)
     return Status::Failed("execute");
+  const int64_t t3 = mono_ns();
   unpack_to_f32(yb.data(), n, dt, y);
+  mark_phase(sess, t1 - t0, t2 - t1, t3 - t2);
   return Status::Ok();
 }
 
@@ -443,6 +476,7 @@ inline Status run_conv2d(Session& sess, int32_t n, int32_t h, int32_t w, int32_t
                          const char* opname = QNN_OP_CONV_2D) {
   auto* api = reinterpret_cast<QNN_INTERFACE_VER_TYPE*>(sess.api());
   if (!api || !sess.context_handle()) return Status::Failed("session not ready");
+  const int64_t t0 = mono_ns();
   Qnn_GraphHandle_t graph = nullptr;
   if (api->graphCreate(sess.context_handle(), uniq_name("wq_conv2d"), nullptr, &graph) != QNN_SUCCESS)
     return Status::Failed("graphCreate");
@@ -524,7 +558,9 @@ inline Status run_conv2d(Session& sess, int32_t n, int32_t h, int32_t w, int32_t
   op.v1.numOfOutputs = 1;
   op.v1.outputTensors = &tout;
   if (api->graphAddNode(graph, op) != QNN_SUCCESS) return Status::Failed(std::string("addNode ") + opname);
+  const int64_t t1 = mono_ns();
   if (api->graphFinalize(graph, nullptr, nullptr) != QNN_SUCCESS) return Status::Failed("finalize");
+  const int64_t t2 = mono_ns();
 
   Qnn_Tensor_t ein = tin, eout = tout;
   ein.v1.clientBuf.data = in_buf.data();
@@ -533,7 +569,9 @@ inline Status run_conv2d(Session& sess, int32_t n, int32_t h, int32_t w, int32_t
   eout.v1.clientBuf.dataSize = (uint32_t)out_buf.size();
   if (api->graphExecute(graph, &ein, 1, &eout, 1, nullptr, nullptr) != QNN_SUCCESS)
     return Status::Failed("execute");
+  const int64_t t3 = mono_ns();
   unpack_to_f32(out_buf.data(), n_out, dt, y);
+  mark_phase(sess, t1 - t0, t2 - t1, t3 - t2);
   return Status::Ok();
 }
 
@@ -542,6 +580,7 @@ inline Status run_conv3d(Session& sess, int32_t n, int32_t d, int32_t h, int32_t
                          const float* x, float* y, DType dt, const char* opname = QNN_OP_CONV_3D) {
   auto* api = reinterpret_cast<QNN_INTERFACE_VER_TYPE*>(sess.api());
   if (!api || !sess.context_handle()) return Status::Failed("session not ready");
+  const int64_t t0 = mono_ns();
   Qnn_GraphHandle_t graph = nullptr;
   if (api->graphCreate(sess.context_handle(), uniq_name("wq_conv3d"), nullptr, &graph) != QNN_SUCCESS)
     return Status::Failed("graphCreate");
@@ -607,7 +646,9 @@ inline Status run_conv3d(Session& sess, int32_t n, int32_t d, int32_t h, int32_t
   op.v1.numOfOutputs = 1;
   op.v1.outputTensors = &tout;
   if (api->graphAddNode(graph, op) != QNN_SUCCESS) return Status::Failed("addNode conv3d");
+  const int64_t t1 = mono_ns();
   if (api->graphFinalize(graph, nullptr, nullptr) != QNN_SUCCESS) return Status::Failed("finalize");
+  const int64_t t2 = mono_ns();
   Qnn_Tensor_t ein = tin, eout = tout;
   ein.v1.clientBuf.data = in_buf.data();
   ein.v1.clientBuf.dataSize = (uint32_t)in_buf.size();
@@ -615,7 +656,9 @@ inline Status run_conv3d(Session& sess, int32_t n, int32_t d, int32_t h, int32_t
   eout.v1.clientBuf.dataSize = (uint32_t)out_buf.size();
   if (api->graphExecute(graph, &ein, 1, &eout, 1, nullptr, nullptr) != QNN_SUCCESS)
     return Status::Failed("execute");
+  const int64_t t3 = mono_ns();
   unpack_to_f32(out_buf.data(), n_out, dt, y);
+  mark_phase(sess, t1 - t0, t2 - t1, t3 - t2);
   return Status::Ok();
 }
 
@@ -623,6 +666,7 @@ inline Status run_gather(Session& sess, int32_t vocab, int32_t dim, const float*
                          int32_t n, const int32_t* ids, float* y, DType dt) {
   auto* api = reinterpret_cast<QNN_INTERFACE_VER_TYPE*>(sess.api());
   if (!api || !sess.context_handle()) return Status::Failed("session not ready");
+  const int64_t t0 = mono_ns();
   Qnn_GraphHandle_t graph = nullptr;
   if (api->graphCreate(sess.context_handle(), uniq_name("wq_embed"), nullptr, &graph) != QNN_SUCCESS)
     return Status::Failed("graphCreate");
@@ -675,7 +719,9 @@ inline Status run_gather(Session& sess, int32_t vocab, int32_t dim, const float*
   op.v1.numOfOutputs = 1;
   op.v1.outputTensors = &tout;
   if (api->graphAddNode(graph, op) != QNN_SUCCESS) return Status::Failed("addNode gather");
+  const int64_t t1 = mono_ns();
   if (api->graphFinalize(graph, nullptr, nullptr) != QNN_SUCCESS) return Status::Failed("finalize");
+  const int64_t t2 = mono_ns();
   Qnn_Tensor_t eid = tids, eout = tout;
   eid.v1.clientBuf.data = id_buf.data();
   eid.v1.clientBuf.dataSize = (uint32_t)(n * sizeof(int32_t));
@@ -683,7 +729,9 @@ inline Status run_gather(Session& sess, int32_t vocab, int32_t dim, const float*
   eout.v1.clientBuf.dataSize = (uint32_t)out_buf.size();
   if (api->graphExecute(graph, &eid, 1, &eout, 1, nullptr, nullptr) != QNN_SUCCESS)
     return Status::Failed("execute");
+  const int64_t t3 = mono_ns();
   unpack_to_f32(out_buf.data(), (size_t)n * dim, dt, y);
+  mark_phase(sess, t1 - t0, t2 - t1, t3 - t2);
   return Status::Ok();
 }
 

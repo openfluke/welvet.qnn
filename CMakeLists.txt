@@ -21,40 +21,50 @@ else()
   message(STATUS "welvet.qnn: no QAIRT SDK — stub build (detect filesystem only)")
 endif()
 
-add_library(welvet_qnn
+set(WQNN_SOURCES
   src/detect.cpp
   src/dtype.cpp
   src/session.cpp
   src/layers.cpp
   src/sequential.cpp
+  src/c_abi.cpp
 )
+
+# Static lib (tools / embed)
+add_library(welvet_qnn STATIC ${WQNN_SOURCES})
 add_library(welvet_qnn::welvet_qnn ALIAS welvet_qnn)
 
-target_include_directories(welvet_qnn
-  PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-  PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
+# Shared DLL/so for Welvet Go cgo (libwelvet_qnn.dll)
+add_library(welvet_qnn_shared SHARED ${WQNN_SOURCES})
+set_target_properties(welvet_qnn_shared PROPERTIES
+  OUTPUT_NAME welvet_qnn
+  WINDOWS_EXPORT_ALL_SYMBOLS OFF
 )
 
-target_compile_definitions(welvet_qnn PUBLIC WELVET_QNN_HAS_SDK=${WELVET_QNN_HAS_SDK})
-
-if(WELVET_QNN_HAS_SDK)
-  target_include_directories(welvet_qnn PRIVATE
-    "${QAIRT_SDK_ROOT}/include/QNN"
-    "${QAIRT_SDK_ROOT}/include"
+foreach(tgt welvet_qnn welvet_qnn_shared)
+  target_include_directories(${tgt}
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      $<INSTALL_INTERFACE:include>
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
-endif()
+  target_compile_definitions(${tgt} PUBLIC WELVET_QNN_HAS_SDK=${WELVET_QNN_HAS_SDK})
+  if(WELVET_QNN_HAS_SDK)
+    target_include_directories(${tgt} PRIVATE
+      "${QAIRT_SDK_ROOT}/include/QNN"
+      "${QAIRT_SDK_ROOT}/include"
+    )
+  endif()
+  if(WIN32)
+    target_compile_definitions(${tgt} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  endif()
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.0)
+    target_link_libraries(${tgt} PUBLIC stdc++fs)
+  endif()
+endforeach()
 
-if(WIN32)
-  target_compile_definitions(welvet_qnn PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-endif()
-
-# libstdc++ / libc++ filesystem (GCC < 9)
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.0)
-  target_link_libraries(welvet_qnn PUBLIC stdc++fs)
-endif()
+target_compile_definitions(welvet_qnn_shared PRIVATE WELVET_QNN_BUILD_SHARED)
 
 if(WELVET_QNN_BUILD_TOOLS)
   add_executable(welvet_qnn_smoke tools/smoke/main.cpp)
@@ -73,9 +83,10 @@ if(WELVET_QNN_BUILD_TOOLS)
   endif()
 endif()
 
-install(TARGETS welvet_qnn
+install(TARGETS welvet_qnn welvet_qnn_shared
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
 )
 install(DIRECTORY include/welvet_qnn DESTINATION include)
+install(FILES include/welvet_qnn_c.h DESTINATION include)

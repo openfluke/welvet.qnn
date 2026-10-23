@@ -1,7 +1,7 @@
 # welvet.qnn — Qualcomm Hexagon NPU (QNN HTP)
 
 Standalone **C++17** library. Target = **NPU forward**.  
-Public surface is **Welvet-shaped** (layer blanks + `DType`) so a **C ABI / Go FFI** can wrap it later — not an ONNX importer.
+Public surface is **Welvet-shaped** (layer blanks + `DType`) + **C ABI** (`welvet_qnn_c.h`) for Welvet Go `nativeqnn` — not an ONNX importer.
 
 | | |
 |--|--|
@@ -62,7 +62,23 @@ Children: Dense, Softmax, RmsNorm, LayerNorm, SwiGlu, Mha, Lstm.
 
 ---
 
-## Packing (for future C ABI / Go)
+## C ABI → Welvet Go
+
+| Artifact | Location |
+|----------|----------|
+| Header | `include/welvet_qnn_c.h` (also `welvet/native/qnn/include/`) |
+| DLL | `libwelvet_qnn.dll` → `welvet/native/qnn/windows_arm64/` |
+| Go | `github.com/openfluke/welvet/nativeqnn` |
+
+Caps: `wqnn_layer_supported` / `wqnn_supported_layers` — Go rejects unsupported mounts on `SyncToQNN`.
+
+User-owned sync in Welvet:
+
+```text
+SyncToQNN → BackendQNN Forward → SyncFromQNN (optional)
+```
+
+## Packing
 
 | Layer | Host pack |
 |-------|-----------|
