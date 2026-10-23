@@ -221,7 +221,7 @@ static void run_layers_saver() {
 }
 
 int main() {
-  std::printf("welvet.qnn smoke v0.2.1 (Welvet Sequential + packs)\n");
+  std::printf("welvet.qnn smoke v1.0.0 (Welvet Sequential + packs)\n");
   std::printf("supported layers:");
   for (const char** p = supported_layers; *p; ++p) std::printf(" %s", *p);
   std::printf("\n");
