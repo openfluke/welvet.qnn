@@ -5,13 +5,13 @@ Public surface is **Welvet-shaped** (layer blanks + `DType`) + **C ABI** (`welve
 
 | | |
 |--|--|
-| **Library** | **1.0.0** |
+| **Library** | **1.1.0** |
 | **SDK** | QAIRT **2.42.0.251225** · QNN API **2.32** |
-| **Host** | Windows ARM64 · Snapdragon X · Hexagon **V73** · HNRD |
+| **Hosts** | Windows ARM64 · Snapdragon X · Hexagon **V73** · HNRD · **Android arm64-v8a** |
 | **Go** | `nativeqnn` · `BackendQNN` · user `SyncToQNN` / `SyncFromQNN` |
 | **Bench** | `w2a` `go_v_qnn` large matrix — NPU wins dense/cnn/mha/swiglu/… vs Go/native |
 
-**Requires:** Memory Integrity (HVCI) **OFF** + reboot, or `backendCreate` dies with `0xC00000FD`.
+**Requires (Windows):** Memory Integrity (HVCI) **OFF** + reboot, or `backendCreate` dies with `0xC00000FD`.
 
 See [VERSIONING.md](VERSIONING.md) for 1.x policy and sibling vendor repos.
 
@@ -66,7 +66,8 @@ Today each child is its own HTP graph (host ping-pong). Fused single-graph Seque
 | Artifact | Location |
 |----------|----------|
 | Header | `include/welvet_qnn_c.h` (also `welvet/native/qnn/include/`) |
-| DLL | `libwelvet_qnn.dll` → `welvet/native/qnn/windows_arm64/` |
+| Windows DLL | `libwelvet_qnn.dll` → `welvet/native/qnn/windows_arm64/` |
+| Android `.so` | `libwelvet_qnn.so` → `welvet/native/qnn/android_arm64/` |
 | Go | `github.com/openfluke/welvet/nativeqnn` |
 
 Caps: `wqnn_layer_supported` / `wqnn_supported_layers` — Go rejects unsupported mounts on `SyncToQNN`.
@@ -85,7 +86,7 @@ CNN1, ConvT1, RNN, KMeans, Mamba, GDN — no HTP op / Welvet host-only.
 
 ---
 
-## Build / smoke
+## Build / smoke (Windows ARM64)
 
 ```powershell
 $env:QAIRT_SDK_ROOT = "C:\Qualcomm\AIStack\QAIRT\qairt\2.42.0.251225"
@@ -97,11 +98,20 @@ $env:PATH = ".\build;$env:QAIRT_SDK_ROOT\lib\aarch64-windows-msvc;$env:PATH"
 .\build\welvet_qnn_smoke.exe
 ```
 
+## Build / install (Android arm64)
+
+```bash
+export ANDROID_NDK="$HOME/Android/Sdk/ndk/28.2.13676358"   # or any NDK 26+
+# optional for full HTP (not stub):
+# export QAIRT_SDK_ROOT=/path/to/qairt/...
+./scripts/android_install_go.sh   # → ../welvet/native/qnn/android_arm64/libwelvet_qnn.so
+```
+
 | Target | Role |
 |--------|------|
 | `libwelvet_qnn` | Shared lib + C ABI |
-| `welvet_qnn_smoke` | Full layer×dtype on HTP |
-| `welvet_qnn_probe` | Child-process `backendCreate` gate |
+| `welvet_qnn_smoke` | Full layer×dtype on HTP (host builds) |
+| `welvet_qnn_probe` | Child-process `backendCreate` gate (Windows) |
 
 ---
 

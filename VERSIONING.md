@@ -3,6 +3,7 @@
 | Tag | Meaning |
 |-----|---------|
 | **1.0.0** | First stable HTP ship — C ABI + Go `nativeqnn`, layer×dtype matrix on Snapdragon X / Hexagon V73 (Windows ARM64) |
+| **1.1.0** | Android arm64-v8a host + Go `nativeqnn` android/arm64; NDK install scripts → `welvet/native/qnn/android_arm64/` |
 | **1.x.y** | Qualcomm Hexagon / QNN HTP only (this repo). Patch = bugfix; minor = new layers/dtypes/OS |
 
 ## Known 1.0.0 gaps (honest)
@@ -20,7 +21,7 @@ Vendor accel stays isolated to prevent SDK / symbol / license contamination:
 
 | Repo (planned) | Vendor | OS targets |
 |----------------|--------|------------|
-| **welvet.qnn** (this) | Qualcomm Hexagon NPU | Windows ARM64 → Linux ARM64 |
+| **welvet.qnn** (this) | Qualcomm Hexagon NPU | Windows ARM64 · Android arm64 → Linux ARM64 |
 | welvet.cuda / welvet.nvidia | NVIDIA GPU | Windows + Linux |
 | welvet.rocm / welvet.amd | AMD GPU | Windows + Linux |
 | welvet.xpu / welvet.intel_gpu | Intel GPU | Windows + Linux |

@@ -77,7 +77,7 @@ LayerId parse_layer(const char* name) {
 
 extern "C" {
 
-const char* wqnn_version(void) { return "1.0.0"; }
+const char* wqnn_version(void) { return "1.1.0"; }
 
 int32_t wqnn_has_sdk(void) {
 #if defined(WELVET_QNN_HAS_SDK) && WELVET_QNN_HAS_SDK

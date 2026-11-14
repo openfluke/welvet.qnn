@@ -29,6 +29,12 @@ std::pair<std::string, std::string> lib_candidates() {
 #  else
   return {"windows_amd64", "x86_64-windows-msvc"};
 #  endif
+#elif defined(__ANDROID__)
+#  if defined(__aarch64__)
+  return {"android_arm64", "aarch64-android"};
+#  else
+  return {"android_x86_64", "x86_64-android"};
+#  endif
 #elif defined(__APPLE__)
   return {"darwin", "aarch64-apple"}; // rarely shipped; detect will miss libs
 #elif defined(__aarch64__)
@@ -45,6 +51,11 @@ std::string find_lib_dir(const std::string& root) {
   std::vector<std::string> cands = {primary};
 #if defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__))
   cands.push_back("arm64x-windows-msvc");
+#elif defined(__ANDROID__) && defined(__aarch64__)
+  // QAIRT / QNN Android arm64 folder names across SDK drops.
+  cands.push_back("arm64-v8a");
+  cands.push_back("aarch64-android-clang8.0");
+  cands.push_back("aarch64-android-clang");
 #endif
   for (const auto& rel : cands) {
     fs::path p = fs::path(root) / "lib" / rel;

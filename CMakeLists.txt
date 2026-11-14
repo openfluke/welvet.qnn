@@ -1,11 +1,16 @@
 cmake_minimum_required(VERSION 3.16)
-project(welvet_qnn VERSION 1.0.0 LANGUAGES CXX)
+project(welvet_qnn VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(WELVET_QNN_BUILD_TOOLS "Build smoke + probe executables" ON)
+# Tools are host utilities (smoke/probe); off by default when cross-compiling for Android.
+if(ANDROID)
+  option(WELVET_QNN_BUILD_TOOLS "Build smoke + probe executables" OFF)
+else()
+  option(WELVET_QNN_BUILD_TOOLS "Build smoke + probe executables" ON)
+endif()
 
 # QAIRT / QNN SDK (optional — without it, library still builds in stub mode)
 set(QAIRT_SDK_ROOT "$ENV{QAIRT_SDK_ROOT}" CACHE PATH "Qualcomm QAIRT/QNN SDK root")
@@ -34,11 +39,13 @@ set(WQNN_SOURCES
 add_library(welvet_qnn STATIC ${WQNN_SOURCES})
 add_library(welvet_qnn::welvet_qnn ALIAS welvet_qnn)
 
-# Shared DLL/so for Welvet Go cgo (libwelvet_qnn.dll)
+# Shared DLL/so for Welvet Go cgo (libwelvet_qnn.dll / .so)
 add_library(welvet_qnn_shared SHARED ${WQNN_SOURCES})
 set_target_properties(welvet_qnn_shared PROPERTIES
   OUTPUT_NAME welvet_qnn
   WINDOWS_EXPORT_ALL_SYMBOLS OFF
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN ON
 )
 
 foreach(tgt welvet_qnn welvet_qnn_shared)
@@ -58,6 +65,9 @@ foreach(tgt welvet_qnn welvet_qnn_shared)
   endif()
   if(WIN32)
     target_compile_definitions(${tgt} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  endif()
+  if(ANDROID)
+    target_link_libraries(${tgt} PUBLIC log)
   endif()
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.0)
     target_link_libraries(${tgt} PUBLIC stdc++fs)

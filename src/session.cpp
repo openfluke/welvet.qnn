@@ -117,13 +117,18 @@ void ensure_adsp_library_path(const std::string& sdk_root) {
     return;
   namespace fs = std::filesystem;
   std::string joined;
-  // Prefer V73 (Snapdragon X) then V81 then others that exist under SDK.
+  // Prefer V73 (Snapdragon X / many phones) then V81 then others that exist under SDK.
   const char* arches[] = {"hexagon-v73", "hexagon-v81", "hexagon-v79", "hexagon-v75",
                           "hexagon-v69", "hexagon-v68"};
+#if defined(_WIN32)
+  const char sep = ';';
+#else
+  const char sep = ':';
+#endif
   for (const char* a : arches) {
     fs::path p = fs::path(sdk_root) / "lib" / a / "unsigned";
     if (!fs::is_directory(p)) continue;
-    if (!joined.empty()) joined += ";";
+    if (!joined.empty()) joined += sep;
     joined += p.string();
   }
   if (joined.empty()) return;
