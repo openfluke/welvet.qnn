@@ -107,6 +107,17 @@ export ANDROID_NDK="$HOME/Android/Sdk/ndk/28.2.13676358"   # or any NDK 26+
 ./scripts/android_install_go.sh   # → ../welvet/native/qnn/android_arm64/libwelvet_qnn.so
 ```
 
+## Release
+
+```bash
+./release.sh --plan                 # version + actions
+./release.sh --dry-run              # notes only (no git/publish)
+./release.sh                        # source tag + GitHub Release
+./release.sh --package-android      # also attach android-arm64-v8a .so tarball
+```
+
+CMake / README `**Library**` / `wqnn_version()` must agree. Tags are immutable.
+
 | Target | Role |
 |--------|------|
 | `libwelvet_qnn` | Shared lib + C ABI |
